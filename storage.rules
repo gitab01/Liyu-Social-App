@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// Media authorization. There is no server proxy, so these rules are the only
+// thing standing between one account and another's uploads. AccessRules.mediaPathFor
+// fixes the object layout to `users/{uid}/{purpose}/{mediaId}`, with the thumbnail
+// beside it at `.../thumb.jpg`; this file enforces exactly that prefix per account.
+//
+// Anything that does not match a rule below is denied by default — that is the rule
+// language's behaviour, not something a further `match` can add — so no object
+// outside `/users/{uid}/` is reachable by a client at all.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Everything a client can touch lives under its own uid prefix. `purpose` is the
+    // MediaPurpose name (post / story / avatar / chat) and is what the story-deletion
+    // carve-out below reads.
+    match /users/{uid}/{purpose}/{allPaths...} {
+
+      // Authenticated read: a signed-in viewer can resolve any thumbnail or full
+      // image. Story bytes stay gated by the Firestore story document (its expiry and
+      // follower rule decide what is linkable at all), so Storage read is not the
+      // secret-keeping layer here.
+      allow read: if request.auth != null;
+
+      // A client may write only inside its own prefix, only images, and only under
+      // 8 MB. The size cap is the difference between a data-thrifty thumbnail
+      // pipeline and a metered-data incident — the compressed pair this app uploads
+      // is a fraction of that, so the cap only ever rejects an out-of-pipeline
+      // original someone tried to push straight from the gallery.
+      allow create, update: if request.auth != null
+        && request.auth.uid == uid
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size < 8 * 1024 * 1024;
+
+      // Story media is reaped by the nightly scheduled Function, which runs with
+      // Admin credentials and bypasses these rules. A client that deleted its own
+      // story file before the document expired would strand a story document
+      // pointing at missing bytes, so client deletion of `story/` objects is
+      // withheld; the other purposes are the app's own `MediaRepository.delete`,
+      // which is a user action on content they still own.
+      allow delete: if request.auth != null
+        && request.auth.uid == uid
+        && purpose != 'story';
+    }
+  }
+}
